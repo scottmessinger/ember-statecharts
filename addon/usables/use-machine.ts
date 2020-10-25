@@ -14,7 +14,7 @@ import {
   StateValue,
   InterpreterOptions,
 } from 'xstate';
-import { setUsableManager } from 'ember-usable';
+import { setUsableManager } from 'ember-could-get-used-to-this';
 import { later, cancel } from '@ember/runloop';
 import { tracked } from '@glimmer/tracking';
 import { getOwner, setOwner } from '@ember/application';
