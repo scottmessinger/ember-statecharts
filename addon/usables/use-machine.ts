@@ -20,11 +20,10 @@ import { tracked } from '@glimmer/tracking';
 import { DEBUG } from '@glimmer/env';
 import { later, cancel } from '@ember/runloop';
 import { getOwner, setOwner } from '@ember/application';
-import { warn } from '@ember/debug';
+import { assert, warn } from '@ember/debug';
 import { action } from '@ember/object';
 
 import { use, Resource } from 'ember-could-get-used-to-this';
-
 
 export const ARGS_STATE_CHANGE_WARNING =
   'A change to passed `args` or a local state change triggered an update to a `useMachine`-usable. You can send a dedicated event to the machine or restart it so this is handled. This is done via the `.update`-hook of the `useMachine`-usable.';
@@ -58,25 +57,40 @@ export type UsableStatechart<
   | MachineConfig<TContext, TStateSchema, TEvent>
   | StateMachine<TContext, TStateSchema, TEvent, TTypestate>;
 
+type Args<
+  TContext,
+  TStateSchema,
+  TEvent extends EventObject,
+  TTypestate extends Typestate<TContext>
+> = {
+  machine: UsableStatechart<TContext, TStateSchema, TEvent, TTypestate>;
+  interpreterOptions: Partial<InterpreterOptions>;
+  onTransition?: StateListener<TContext, TEvent, TStateSchema, TTypestate>;
+};
+
 export class Statechart<
   TContext,
   TStateSchema extends StateSchema,
   TEvent extends EventObject,
   TTypestate extends Typestate<TContext>
-> extends Resource {
-  @tracked service!: Interpreter<TContext, TStateSchema, TEvent, TTypestate>;
-  @tracked _state!: State<TContext, TEvent, TStateSchema, TTypestate>;
+> extends Resource<Args<TContext, TStateSchema, TEvent, TTypestate>> {
+  @tracked service?: Interpreter<TContext, TStateSchema, TEvent, TTypestate> = undefined;
+  // current state of the machine,
+  // set onTransition, which is configured during setup
+  @tracked _state?: State<TContext, TEvent, TStateSchema, TTypestate> = undefined;
 
   machine: StateMachine<TContext, TStateSchema, TEvent, TTypestate>;
   interpreterOptions: Partial<InterpreterOptions>;
-  _onTransition: StateListener<TContext, TEvent, TStateSchema, TTypestate> | undefined = undefined;
 
-  constructor(
-    machine: UsableStatechart<TContext, TStateSchema, TEvent, TTypestate>,
-    interpreterOptions: Partial<InterpreterOptions>,
-    onTransition?: StateListener<TContext, TEvent, TStateSchema, TTypestate>
-  ) {
-    super(...arguments);
+  declare _onTransition: StateListener<TContext, TEvent, TStateSchema, TTypestate> | undefined;
+  declare _config: Partial<MachineOptions<TContext, TEvent>>;
+  declare _context: TContext;
+
+  constructor(owner: unknown, args: Args<TContext, TStateSchema, TEvent, TTypestate>) {
+    super(owner, args);
+
+    let { machine } = args;
+    const { interpreterOptions, onTransition } = args;
 
     machine = machine instanceof StateNode ? machine : createMachine(machine);
 
@@ -85,11 +99,13 @@ export class Statechart<
     this._onTransition = onTransition;
   }
 
-  get state(): {
-    state: State<TContext, TEvent, TStateSchema, TTypestate>;
-    send: Send<TContext, TStateSchema, TEvent, TTypestate>;
-    service: Interpreter<TContext, TStateSchema, TEvent, TTypestate>;
-  } {
+  get state() {
+    if (!this.service) {
+      this.setup();
+    }
+
+    assert(`Machine setup failed`, this.service);
+
     return {
       state: this._state,
       send: this.service.send,
@@ -97,14 +113,14 @@ export class Statechart<
     };
   }
 
+  // used when this Resource is used as a helper
   get value() {
-    // TODO: lazily call setup, as we don't know if the call site has .withContext or .withConfig
-    return "foo";
+    return this.state;
   }
 
   @action
-  send() {
-    this.service.send(...arguments);
+  send(...args: Parameters<Interpreter<TContext, TStateSchema, TEvent, TTypestate>['send']>) {
+    this.state.service.send(...args);
   }
 
   @action
@@ -112,7 +128,6 @@ export class Statechart<
     this._onTransition = fn;
     return this;
   }
-
 
   @action
   withContext(context: TContext) {
@@ -127,7 +142,6 @@ export class Statechart<
 
     return this;
   }
-
 
   setup(
     setupOptions: {
@@ -159,6 +173,8 @@ export class Statechart<
   }
 
   teardown(): void {
+    if (!this.service) return;
+
     this.service.stop();
   }
 }
