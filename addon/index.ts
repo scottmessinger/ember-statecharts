@@ -1,6 +1,7 @@
 import useMachine, {
   ConfigurableMachineDefinition,
   InterpreterUsable,
+  Statechart,
 } from './usables/use-machine';
 
 import {
@@ -75,4 +76,4 @@ function interpreterFor<
   >;
 }
 
-export { useMachine, matchesState, interpreterFor };
+export { useMachine, matchesState, interpreterFor, Statechart };

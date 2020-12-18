@@ -9,7 +9,7 @@ import { tracked } from '@glimmer/tracking';
 import { action } from '@ember/object';
 import { setComponentTemplate } from '@ember/component';
 
-import { useMachine, matchesState } from 'ember-statecharts';
+import { useMachine, matchesState, Statechart } from 'ember-statecharts';
 import { ARGS_STATE_CHANGE_WARNING } from 'ember-statecharts/usables/use-machine';
 
 module('Unit | use-machine', function (hooks) {
@@ -20,6 +20,7 @@ module('Unit | use-machine', function (hooks) {
       initial: 'stopped',
       states: {
         stopped: {
+          id: 'stopped',
           on: {
             START: {
               target: 'started',
@@ -28,8 +29,13 @@ module('Unit | use-machine', function (hooks) {
           },
         },
         started: {
+          entry: ['logit'],
+          exit: ['logitleave'],
           on: {
             STOP: 'stopped',
+          },
+          meta: {
+            message: 'Loading...',
           },
         },
       },
@@ -56,21 +62,28 @@ module('Unit | use-machine', function (hooks) {
     test('passing a machine created with `Machine` works', async function (assert) {
       const testContext = this;
 
-      const { TestMachine } = this;
+      const { TestMachineConfig } = this;
 
       class Test extends Component {
-        @use statechart = useMachine(TestMachine)
-          .withConfig({
-            actions: {
-              lol(context) {
-                assert.equal(context.name, 'Tomster', 'context was updated as expected');
-                assert.step('patched');
-              },
+        @use statechart = new Statechart(() => [
+          {
+            owner: this,
+            chart: TestMachineConfig,
+            context: {
+              name: this.name,
             },
-          })
-          .withContext({
-            name: this.name,
-          });
+          },
+        ]);
+
+        lol = (context) => {
+          console.log('context', context);
+          assert.equal(context.name, 'Tomster', 'context was updated as expected');
+          assert.step('patched');
+        };
+
+        logit = (context) => console.log('LOGIT!');
+
+        logitleave = (context) => console.log('LEAVE');
 
         constructor(owner, args) {
           super(owner, args);
@@ -93,7 +106,8 @@ module('Unit | use-machine', function (hooks) {
         'statechart state is accessible'
       );
 
-      testContext.test.statechart.send('START');
+      testContext.test.statechart.send({ type: 'START' });
+      // console.log('test', testContext.test.statechart.state.value, testContext.test.statechart);
 
       assert.equal(testContext.test.statechart.state.value, 'started', 'statechart state updated');
 

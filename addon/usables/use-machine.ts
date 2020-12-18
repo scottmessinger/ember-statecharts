@@ -1,12 +1,9 @@
-import { DEBUG } from '@glimmer/env';
-import { tracked } from '@glimmer/tracking';
 import { assert } from '@ember/debug';
 import { action } from '@ember/object';
 import { cancel, later } from '@ember/runloop';
-
+import { DEBUG } from '@glimmer/env';
+import { tracked } from '@glimmer/tracking';
 import { Resource } from 'ember-could-get-used-to-this';
-import { createMachine, interpret } from 'xstate';
-
 import type {
   EventObject,
   Interpreter,
@@ -17,6 +14,7 @@ import type {
   StateSchema,
   Typestate,
 } from 'xstate';
+import { interpret, Machine } from 'xstate';
 import type { StateListener } from 'xstate/lib/interpreter';
 
 const INTERPRETER = Symbol('interpreter');
@@ -27,20 +25,29 @@ const ERROR_CANT_RECONFIGURE = `Cannot re-invoke withContext after the interpret
 const ERROR_CHART_MISSING = `A statechart was not passed`;
 
 type Args<Context, Schema extends StateSchema, Event extends EventObject> = {
-  positional?: [MachineConfig<Context, Schema, Event>];
-  named?: {
-    chart: MachineConfig<Context, Schema, Event>;
-    config?: Partial<MachineOptions<Context, Event>>;
-    context?: Context;
-    initialState?: State<Context, Event>;
-    onTransition?: StateListener<Context, Event, Schema, Typestate<Context>>;
-  };
+  positional?: [
+    {
+      chart: MachineConfig<Context, Schema, Event>;
+      config?: Partial<MachineOptions<Context, Event>>;
+      context?: Context;
+      initialState?: State<Context, Event>;
+      onTransition?: StateListener<Context, Event, Schema, Typestate<Context>>;
+    }
+  ];
 };
 
 type SendArgs<Context, Schema extends StateSchema, Event extends EventObject> = Parameters<
   Interpreter<Context, Schema, Event>['send']
 >;
 
+/**
+ *
+  @use statechart = new Statechart(() => [{
+    chart: chart,
+    config: {},
+    context: {},
+  }])
+ */
 export class Statechart<
   Context,
   Schema extends StateSchema,
@@ -61,9 +68,9 @@ export class Statechart<
     // withConfig: Statechart<Context, Schema, Event>['withConfig'];
     // onTransition: Statechart<Context, Schema, Event>['onTransition'];
   } {
-    if (!this[INTERPRETER]) {
-      this._setupMachine();
-    }
+    // if (!this[INTERPRETER]) {
+    //   this._setupMachine();
+    // }
 
     return {
       // For TypeScript, this is tricky because this is what is accessible at the call site
@@ -126,19 +133,53 @@ export class Statechart<
    * Private
    */
 
-  private get [CONFIG]() {
-    return this.args.named;
-  }
-
   @action
   send(...args: SendArgs<Context, Schema, Event>) {
     return this[INTERPRETER].send(...args);
   }
 
   @action
-  private _setupMachine() {
-    this.withContext(this[CONFIG]?.context);
-    this.withConfig(this[CONFIG]?.config);
+  private _setupMachine() {}
+
+  /**
+   * Lifecycle methods on Resource
+   *
+   */
+  @action
+  protected setup() {
+    console.log('this.setup');
+    let { chart, context, config, owner } = this.args.positional?.[0];
+
+    assert(ERROR_CHART_MISSING, chart);
+
+    let gatherActions = function (object, actionsArray) {
+      for (let k in object) {
+        if (['entry', 'exit', 'actions'].includes(k)) {
+          if (Array.isArray(object[k])) {
+            actionsArray = actionsArray.concat(object[k]);
+          } else if (typeof object[k] === 'string') {
+            actionsArray.push(object[k]);
+          }
+        } else if (typeof object[k] === 'object' && object[k] !== null) {
+          actionsArray = gatherActions(object[k], actionsArray);
+        }
+      }
+      return actionsArray;
+    };
+
+    let allActions: Array<string> = gatherActions(chart, []);
+    let actionsConfig = allActions.reduce((acc, actionName) => {
+      if (owner[actionName] === undefined) throw Error(`Must implement ${actionName}.`);
+      acc[actionName] = owner[actionName];
+      return acc;
+    }, {});
+
+    let actions = config?.actions || {};
+    actions = { ...actionsConfig, ...actions };
+    config = config || {};
+    config = { ...config, ...{ actions: actions } };
+
+    this[MACHINE] = Machine(chart).withContext(context).withConfig(config);
 
     this[INTERPRETER] = interpret(this[MACHINE], {
       devTools: DEBUG,
@@ -150,26 +191,15 @@ export class Statechart<
           return cancel.call(null, timer);
         },
       },
-    }).onTransition((state) => {
+    });
+
+    this[INTERPRETER].onTransition((state) => {
       this.state = state;
     });
 
-    this.onTransition(this[CONFIG]?.onTransition);
+    this.onTransition(config?.onTransition);
 
-    this[INTERPRETER].start(this[CONFIG]?.initialState);
-  }
-
-  /**
-   * Lifecycle methods on Resource
-   *
-   */
-  @action
-  protected setup() {
-    let statechart = this.args.positional?.[0] || this.args.named?.chart;
-
-    assert(ERROR_CHART_MISSING, statechart);
-
-    this[MACHINE] = createMachine(statechart);
+    this[INTERPRETER].start();
   }
 
   protected teardown() {
