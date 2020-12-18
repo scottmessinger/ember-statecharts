@@ -1,158 +1,162 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import {
-  interpret,
-  createMachine,
-  StateNode,
-  EventObject,
-  StateMachine,
-  Typestate,
-  MachineConfig,
-  StateSchema,
-  Interpreter,
-  State,
-  MachineOptions,
-  StateValue,
-  InterpreterOptions,
-} from 'xstate';
-import { StateListener } from 'xstate/lib/interpreter';
-
-import { tracked } from '@glimmer/tracking';
 import { DEBUG } from '@glimmer/env';
-import { later, cancel } from '@ember/runloop';
-import { getOwner, setOwner } from '@ember/application';
-import { assert, warn } from '@ember/debug';
+import { tracked } from '@glimmer/tracking';
+import { assert } from '@ember/debug';
 import { action } from '@ember/object';
+import { cancel, later } from '@ember/runloop';
 
-import { use, Resource } from 'ember-could-get-used-to-this';
+import { Resource } from 'ember-could-get-used-to-this';
+import { createMachine, interpret } from 'xstate';
 
-export const ARGS_STATE_CHANGE_WARNING =
-  'A change to passed `args` or a local state change triggered an update to a `useMachine`-usable. You can send a dedicated event to the machine or restart it so this is handled. This is done via the `.update`-hook of the `useMachine`-usable.';
+import type {
+  EventObject,
+  Interpreter,
+  MachineConfig,
+  MachineOptions,
+  State,
+  StateMachine,
+  StateSchema,
+  Typestate,
+} from 'xstate';
+import type { StateListener } from 'xstate/lib/interpreter';
 
-export type Send<
-  TContext,
-  TStateSchema extends StateSchema,
-  TEvent extends EventObject,
-  TTypestate extends Typestate<TContext> = { value: any; context: TContext }
-> = Interpreter<TContext, TStateSchema, TEvent, TTypestate>['send'];
+const INTERPRETER = Symbol('interpreter');
+const CONFIG = Symbol('config');
+const MACHINE = Symbol('machine');
 
-export type UpdateFunction<
-  TContext,
-  TStateSchema extends StateSchema,
-  TEvent extends EventObject,
-  TTypestate extends Typestate<TContext> = { value: any; context: TContext }
-> = (args: {
-  machine: StateMachine<TContext, TStateSchema, TEvent, TTypestate>;
-  context?: TContext;
-  config?: Partial<MachineOptions<TContext, TEvent>>;
-  send: Send<TContext, TStateSchema, TEvent, TTypestate>;
-  restart: (initialState?: State<TContext, TEvent, TStateSchema, TTypestate> | StateValue) => void;
-}) => void;
+const ERROR_CANT_RECONFIGURE = `Cannot re-invoke withContext after the interpreter has been initialized`;
+const ERROR_CHART_MISSING = `A statechart was not passed`;
 
-export type UsableStatechart<
-  TContext,
-  TStateSchema extends StateSchema,
-  TEvent extends EventObject,
-  TTypestate extends Typestate<TContext> = { value: any; context: TContext }
-> =
-  | MachineConfig<TContext, TStateSchema, TEvent>
-  | StateMachine<TContext, TStateSchema, TEvent, TTypestate>;
-
-type Args<
-  TContext,
-  TStateSchema,
-  TEvent extends EventObject,
-  TTypestate extends Typestate<TContext>
-> = {
-  machine: UsableStatechart<TContext, TStateSchema, TEvent, TTypestate>;
-  interpreterOptions: Partial<InterpreterOptions>;
-  onTransition?: StateListener<TContext, TEvent, TStateSchema, TTypestate>;
+type Args<Context, Schema extends StateSchema, Event extends EventObject> = {
+  positional?: [MachineConfig<Context, Schema, Event>];
+  named?: {
+    chart: MachineConfig<Context, Schema, Event>;
+    config?: Partial<MachineOptions<Context, Event>>;
+    context?: Context;
+    initialState?: State<Context, Event>;
+    onTransition?: StateListener<Context, Event, Schema, Typestate<Context>>;
+  };
 };
 
+type SendArgs<Context, Schema extends StateSchema, Event extends EventObject> = Parameters<
+  Interpreter<Context, Schema, Event>['send']
+>;
+
+/**
+ *
+  @use
+  interpreter = new Statechart(() => [statechart])
+    .withContext(this.context).withConfig({
+      actions: {
+        returnSelectedToHand: this._returnSelectedToHand,
+        showSelected: this._showSelected,
+        closeHand: this._closeHand,
+        fanOpen: this._fanOpen,
+        adjustHand: this._adjustHand,
+      },
+      guards: {},
+    });
+ */
 export class Statechart<
-  TContext,
-  TStateSchema extends StateSchema,
-  TEvent extends EventObject,
-  TTypestate extends Typestate<TContext>
-> extends Resource<Args<TContext, TStateSchema, TEvent, TTypestate>> {
-  @tracked service?: Interpreter<TContext, TStateSchema, TEvent, TTypestate> = undefined;
-  // current state of the machine,
-  // set onTransition, which is configured during setup
-  @tracked _state?: State<TContext, TEvent, TStateSchema, TTypestate> = undefined;
+  Context,
+  Schema extends StateSchema,
+  Event extends EventObject
+> extends Resource<Args<Context, Schema, Event>> {
+  declare [MACHINE]: StateMachine<Context, Schema, Event>;
+  declare [INTERPRETER]: Interpreter<Context, Schema, Event>;
 
-  machine: StateMachine<TContext, TStateSchema, TEvent, TTypestate>;
-  interpreterOptions: Partial<InterpreterOptions>;
+  @tracked state?: State<Context, Event>;
 
-  declare _onTransition: StateListener<TContext, TEvent, TStateSchema, TTypestate> | undefined;
-  declare _config: Partial<MachineOptions<TContext, TEvent>>;
-  declare _context: TContext;
-
-  constructor(owner: unknown, args: Args<TContext, TStateSchema, TEvent, TTypestate>) {
-    super(owner, args);
-
-    let { machine } = args;
-    const { interpreterOptions, onTransition } = args;
-
-    machine = machine instanceof StateNode ? machine : createMachine(machine);
-
-    this.machine = machine;
-    this.interpreterOptions = interpreterOptions || {};
-    this._onTransition = onTransition;
-  }
-
-  get state() {
-    if (!this.service) {
-      this.setup();
+  /**
+   * This is the return value of `new Statechart(() => ...)`
+   */
+  get value(): {
+    state?: State<Context, Event>;
+    send: Statechart<Context, Schema, Event>['send'];
+    // withContext: Statechart<Context, Schema, Event>['withContext'];
+    // withConfig: Statechart<Context, Schema, Event>['withConfig'];
+    // onTransition: Statechart<Context, Schema, Event>['onTransition'];
+  } {
+    if (!this[INTERPRETER]) {
+      this._setupMachine();
     }
 
-    assert(`Machine setup failed`, this.service);
-
     return {
-      state: this._state,
-      send: this.service.send,
-      service: this.service,
+      // For TypeScript, this is tricky because this is what is accessible at the call site
+      // but typescript thinks the context is the class instance.
+      //
+      // To remedy, each property has to also exist on the class body under the same name
+      state: this.state,
+      send: this.send,
+
+      /**
+       * One Time methods
+       * Currently disabled due to issues with the use/resource transform not allowing
+       * the builder pattern
+       *
+       * If the transform is fixed, we can remove the protected visibility modifier
+       * and uncomment out these three lines in a back-compat way for existing users
+       */
+      // withContext: this.withContext,
+      // withConfig: this.withConfig,
+      // onTransition: this.onTransition,
     };
   }
 
-  // used when this Resource is used as a helper
-  get value() {
-    return this.state;
-  }
-
   @action
-  send(...args: Parameters<Interpreter<TContext, TStateSchema, TEvent, TTypestate>['send']>) {
-    this.state.service.send(...args);
-  }
+  protected withContext(context?: Context) {
+    assert(ERROR_CANT_RECONFIGURE, !this[INTERPRETER]);
 
-  @action
-  onTransition(fn: StateListener<TContext, TEvent, TStateSchema, TTypestate>) {
-    this._onTransition = fn;
-    return this;
-  }
-
-  @action
-  withContext(context: TContext) {
-    this._context = context;
+    if (context) {
+      this[MACHINE] = this[MACHINE].withContext(context);
+    }
 
     return this;
   }
 
   @action
-  withConfig(config: Partial<MachineOptions<TContext, TEvent>>) {
-    this._config = config;
+  protected withConfig(config?: Partial<MachineOptions<Context, Event>>) {
+    assert(ERROR_CANT_RECONFIGURE, !this[INTERPRETER]);
+
+    if (config) {
+      this[MACHINE] = this[MACHINE].withConfig(config);
+    }
 
     return this;
   }
 
-  setup(
-    setupOptions: {
-      initialState?: State<TContext, TEvent, TStateSchema, TTypestate> | StateValue;
-    } = {}
-  ): void {
-    const { state } = this.interpreterOptions;
+  @action
+  protected onTransition(fn?: StateListener<Context, Event, Schema, Typestate<Context>>) {
+    if (!this[INTERPRETER]) {
+      this._setupMachine();
+    }
 
-    this.service = interpret(this.machine, {
+    if (fn) {
+      this[INTERPRETER].onTransition(fn);
+    }
+
+    return this;
+  }
+
+  /**
+   * Private
+   */
+
+  private get [CONFIG]() {
+    return this.args.named;
+  }
+
+  @action
+  send(...args: SendArgs<Context, Schema, Event>) {
+    return this[INTERPRETER].send(...args);
+  }
+
+  @action
+  private _setupMachine() {
+    this.withContext(this[CONFIG]?.context);
+    this.withConfig(this[CONFIG]?.config);
+
+    this[INTERPRETER] = interpret(this[MACHINE], {
       devTools: DEBUG,
-      ...this.interpreterOptions,
       clock: {
         setTimeout(fn, ms) {
           return later.call(null, fn, ms);
@@ -162,19 +166,30 @@ export class Statechart<
         },
       },
     }).onTransition((state) => {
-      this._state = state;
+      this.state = state;
     });
 
-    if (this._onTransition) {
-      this.service.onTransition(this._onTransition);
-    }
+    this.onTransition(this[CONFIG]?.onTransition);
 
-    this.service.start(setupOptions.initialState || state);
+    this[INTERPRETER].start(this[CONFIG]?.initialState);
   }
 
-  teardown(): void {
-    if (!this.service) return;
+  /**
+   * Lifecycle methods on Resource
+   *
+   */
+  @action
+    const statechart = this.args.positional?.[0] || this.args.named?.chart;
+    let statechart = this.args.positional?.[0] || this.args.named?.chart;
 
-    this.service.stop();
+    assert(ERROR_CHART_MISSING, statechart);
+
+    this[MACHINE] = createMachine(statechart);
+  }
+
+  protected teardown() {
+    if (!this[INTERPRETER]) return;
+
+    this[INTERPRETER].stop();
   }
 }
